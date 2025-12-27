@@ -13,6 +13,6 @@ The MVP provides basic single-file serving. Users need additional capabilities f
 
 ## Impact
 
-- Affected specs: `file-serving` (modify existing capability)
+- Affected specs: `file-serving` (modify existing capability), `file-uploading` (new capability)
 - Affected code: Extend HTTP handler, add archive creation, add upload handler
 - Dependencies: Go standard library (archive/tar, archive/zip, compress/gzip, compress/bzip2)

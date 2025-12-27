@@ -36,49 +36,21 @@ The system SHALL serve directories as compressed archives.
 - **THEN** the system creates a gzip-compressed tar archive of the directory
 - **AND** serves it with filename `<dirname>.tar.gz`
 
-#### Scenario: ZIP compression
-- **WHEN** user runs `userve -Z <dirpath>` with a directory
+#### Scenario: Explicit tar.gz format
+- **WHEN** user runs `userve -a tar.gz <dirpath>` with a directory
+- **THEN** the system creates a gzip-compressed tar archive (same as default)
+- **AND** serves it with filename `<dirname>.tar.gz`
+
+#### Scenario: ZIP format
+- **WHEN** user runs `userve -a zip <dirpath>` with a directory
 - **THEN** the system creates a ZIP archive of the directory
 - **AND** serves it with filename `<dirname>.zip`
 
-#### Scenario: Bzip2 compression
-- **WHEN** user runs `userve -j <dirpath>` with a directory
-- **THEN** the system creates a bzip2-compressed tar archive
-- **AND** serves it with filename `<dirname>.tar.bz2`
-
-#### Scenario: No compression
-- **WHEN** user runs `userve -u <dirpath>` with a directory
+#### Scenario: Uncompressed tar format
+- **WHEN** user runs `userve -a tar <dirpath>` with a directory
 - **THEN** the system creates an uncompressed tar archive
 - **AND** serves it with filename `<dirname>.tar`
 
-#### Scenario: Gzip compression explicit
-- **WHEN** user runs `userve -z <dirpath>` with a directory
-- **THEN** the system creates a gzip-compressed tar archive (same as default)
-
-### Requirement: Upload Mode
-
-The system SHALL provide an upload form allowing others to send files to the user.
-
-#### Scenario: Start upload server
-- **WHEN** user runs `userve -U`
-- **THEN** the system starts an HTTP server with an upload form
-- **AND** displays the URL where others can upload files
-
-#### Scenario: File upload
-- **WHEN** a client submits a file via the upload form
-- **THEN** the file is saved to the current directory
-- **AND** the system displays the filename and size received
-
-#### Scenario: Upload count limit
-- **WHEN** user runs `userve -U -c 3`
-- **THEN** the system accepts up to 3 file uploads
-- **AND** terminates after the 3rd upload completes
-
-### Requirement: Self Distribution
-
-The system SHALL be able to serve its own binary for easy distribution.
-
-#### Scenario: Serve self
-- **WHEN** user runs `userve -s`
-- **THEN** the system serves its own executable binary
-- **AND** displays the URL where others can download userve
+#### Scenario: Invalid archive format
+- **WHEN** user runs `userve -a invalid <dirpath>` with an unrecognized format
+- **THEN** the system exits with an error listing valid formats

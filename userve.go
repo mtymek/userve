@@ -1,6 +1,9 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"context"
 	"flag"
 	"fmt"
@@ -12,11 +15,38 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 const defaultPort = 8080
+
+// ArchiveFormat represents the archive format for directories
+type ArchiveFormat int
+
+const (
+	ArchiveTarGz ArchiveFormat = iota
+	ArchiveZip
+	ArchiveTar
+)
+
+// validArchiveFormats lists accepted values for the -a flag
+var validArchiveFormats = []string{"tar.gz", "zip", "tar"}
+
+// parseArchiveFormat converts a string to ArchiveFormat
+func parseArchiveFormat(s string) (ArchiveFormat, error) {
+	switch s {
+	case "tar.gz":
+		return ArchiveTarGz, nil
+	case "zip":
+		return ArchiveZip, nil
+	case "tar":
+		return ArchiveTar, nil
+	default:
+		return ArchiveTarGz, fmt.Errorf("invalid archive format %q: valid formats are %v", s, validArchiveFormats)
+	}
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -29,10 +59,12 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("userve", flag.ContinueOnError)
 	port := fs.Int("p", defaultPort, "port to listen on")
 	bindIP := fs.String("i", "", "IP address to bind to (default: all interfaces)")
+	count := fs.Int("c", 1, "number of downloads allowed (0 for unlimited)")
+	archiveFormat := fs.String("a", "tar.gz", "archive format for directories: tar.gz, zip, tar")
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: userve [options] <file>\n\n")
-		fmt.Fprintf(os.Stderr, "Serve a single file over HTTP on your local network.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: userve [options] <file|directory>\n\n")
+		fmt.Fprintf(os.Stderr, "Serve a file or directory over HTTP on your local network.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		fs.PrintDefaults()
 	}
@@ -48,16 +80,19 @@ func run(args []string) error {
 
 	filePath := fs.Arg(0)
 
-	// Validate file exists and is not a directory
+	// Parse archive format
+	format, err := parseArchiveFormat(*archiveFormat)
+	if err != nil {
+		return err
+	}
+
+	// Validate file exists
 	info, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
 		return fmt.Errorf("file not found: %s", filePath)
 	}
 	if err != nil {
 		return fmt.Errorf("cannot access file: %v", err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("directories are not supported: %s", filePath)
 	}
 
 	// Determine bind address
@@ -83,16 +118,37 @@ func run(args []string) error {
 	// Track active downloads for graceful shutdown
 	var activeDownloads sync.WaitGroup
 
-	// Channel to signal successful download completion (one-shot mode)
+	// Channel to signal when download limit reached
 	downloadComplete := make(chan struct{}, 1)
 
-	// Create file handler
-	handler := &fileHandler{
-		filePath:         filePath,
-		fileName:         filepath.Base(filePath),
-		fileSize:         info.Size(),
-		activeDownloads:  &activeDownloads,
-		downloadComplete: downloadComplete,
+	// Create appropriate handler
+	var handler http.Handler
+	var displayName string
+
+	if info.IsDir() {
+		// Directory serving
+		dirHandler := &dirHandler{
+			dirPath:          filePath,
+			dirName:          filepath.Base(filePath),
+			format:           format,
+			activeDownloads:  &activeDownloads,
+			downloadComplete: downloadComplete,
+			maxDownloads:     int32(*count),
+		}
+		handler = dirHandler
+		displayName = dirHandler.archiveFilename()
+	} else {
+		// File serving
+		fileHandler := &fileHandler{
+			filePath:         filePath,
+			fileName:         filepath.Base(filePath),
+			fileSize:         info.Size(),
+			activeDownloads:  &activeDownloads,
+			downloadComplete: downloadComplete,
+			maxDownloads:     int32(*count),
+		}
+		handler = fileHandler
+		displayName = fileHandler.fileName
 	}
 
 	server := &http.Server{
@@ -109,12 +165,17 @@ func run(args []string) error {
 		errChan <- server.Serve(listener)
 	}()
 
-	url := fmt.Sprintf("http://%s:%d/%s", displayIP, *port, handler.fileName)
+	url := fmt.Sprintf("http://%s:%d/%s", displayIP, *port, displayName)
 	fmt.Printf("Serving %s\n", filePath)
 	fmt.Printf("URL: %s\n", url)
+	if *count == 0 {
+		fmt.Printf("Downloads: unlimited\n")
+	} else {
+		fmt.Printf("Downloads: %d remaining\n", *count)
+	}
 	fmt.Printf("Press Ctrl+C to stop\n")
 
-	// Wait for signal, server error, or successful download
+	// Wait for signal, server error, or download limit reached
 	select {
 	case sig := <-sigChan:
 		fmt.Printf("\nReceived %v, shutting down...\n", sig)
@@ -123,7 +184,7 @@ func run(args []string) error {
 			return fmt.Errorf("server error: %v", err)
 		}
 	case <-downloadComplete:
-		fmt.Println("Download complete, shutting down...")
+		fmt.Println("Download limit reached, shutting down...")
 	}
 
 	// Graceful shutdown: stop accepting new connections
@@ -156,6 +217,8 @@ type fileHandler struct {
 	fileSize         int64
 	activeDownloads  *sync.WaitGroup
 	downloadComplete chan struct{}
+	maxDownloads     int32
+	downloadCount    atomic.Int32
 }
 
 func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -189,11 +252,222 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("[%s] Download completed from %s (%d bytes)\n", time.Now().Format("15:04:05"), remoteAddr, written)
 
-	// Signal successful download for one-shot mode
-	select {
-	case h.downloadComplete <- struct{}{}:
-	default:
+	// Track download count
+	newCount := h.downloadCount.Add(1)
+
+	// Check if we've reached the limit
+	if h.maxDownloads == 0 {
+		// Unlimited mode - no shutdown
+		return
 	}
+
+	remaining := h.maxDownloads - newCount
+	if remaining > 0 {
+		fmt.Printf("[%s] %d download(s) remaining\n", time.Now().Format("15:04:05"), remaining)
+	} else {
+		// Signal shutdown when limit reached
+		select {
+		case h.downloadComplete <- struct{}{}:
+		default:
+		}
+	}
+}
+
+type dirHandler struct {
+	dirPath          string
+	dirName          string
+	format           ArchiveFormat
+	activeDownloads  *sync.WaitGroup
+	downloadComplete chan struct{}
+	maxDownloads     int32
+	downloadCount    atomic.Int32
+}
+
+func (h *dirHandler) archiveFilename() string {
+	switch h.format {
+	case ArchiveTarGz:
+		return h.dirName + ".tar.gz"
+	case ArchiveZip:
+		return h.dirName + ".zip"
+	case ArchiveTar:
+		return h.dirName + ".tar"
+	default:
+		return h.dirName + ".tar.gz"
+	}
+}
+
+func (h *dirHandler) contentType() string {
+	switch h.format {
+	case ArchiveTarGz:
+		return "application/gzip"
+	case ArchiveZip:
+		return "application/zip"
+	case ArchiveTar:
+		return "application/x-tar"
+	default:
+		return "application/gzip"
+	}
+}
+
+func (h *dirHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.activeDownloads.Add(1)
+	defer h.activeDownloads.Done()
+
+	remoteAddr := r.RemoteAddr
+	fmt.Printf("[%s] Download started from %s\n", time.Now().Format("15:04:05"), remoteAddr)
+
+	// Set headers
+	filename := h.archiveFilename()
+	w.Header().Set("Content-Type", h.contentType())
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	// Note: Content-Length is not set for streaming archives
+
+	var err error
+	if h.format == ArchiveZip {
+		err = h.writeZipArchive(w)
+	} else {
+		err = h.writeTarArchive(w)
+	}
+
+	if err != nil {
+		fmt.Printf("[%s] Archive creation interrupted from %s: %v\n", time.Now().Format("15:04:05"), remoteAddr, err)
+		return
+	}
+
+	fmt.Printf("[%s] Download completed from %s\n", time.Now().Format("15:04:05"), remoteAddr)
+
+	// Track download count
+	newCount := h.downloadCount.Add(1)
+
+	// Check if we've reached the limit
+	if h.maxDownloads == 0 {
+		// Unlimited mode - no shutdown
+		return
+	}
+
+	remaining := h.maxDownloads - newCount
+	if remaining > 0 {
+		fmt.Printf("[%s] %d download(s) remaining\n", time.Now().Format("15:04:05"), remaining)
+	} else {
+		// Signal shutdown when limit reached
+		select {
+		case h.downloadComplete <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (h *dirHandler) writeTarArchive(w io.Writer) error {
+	var tw *tar.Writer
+
+	switch h.format {
+	case ArchiveTarGz:
+		gw := gzip.NewWriter(w)
+		defer gw.Close()
+		tw = tar.NewWriter(gw)
+	case ArchiveTar:
+		tw = tar.NewWriter(w)
+	default:
+		gw := gzip.NewWriter(w)
+		defer gw.Close()
+		tw = tar.NewWriter(gw)
+	}
+	defer tw.Close()
+
+	baseDir := filepath.Base(h.dirPath)
+
+	return filepath.Walk(h.dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Create tar header
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+
+		// Adjust the name to be relative to the directory being archived
+		relPath, err := filepath.Rel(h.dirPath, path)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.Join(baseDir, relPath)
+
+		// Write header
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		// If it's a file, write its contents
+		if !info.IsDir() {
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+
+			if _, err := io.Copy(tw, file); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+func (h *dirHandler) writeZipArchive(w io.Writer) error {
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	baseDir := filepath.Base(h.dirPath)
+
+	return filepath.Walk(h.dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Create zip header
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+
+		// Adjust the name to be relative to the directory being archived
+		relPath, err := filepath.Rel(h.dirPath, path)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.Join(baseDir, relPath)
+
+		// Ensure directories end with /
+		if info.IsDir() {
+			header.Name += "/"
+		} else {
+			header.Method = zip.Deflate
+		}
+
+		// Write header
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		// If it's a file, write its contents
+		if !info.IsDir() {
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+
+			if _, err := io.Copy(writer, file); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 func detectMIMEType(filename string) string {
