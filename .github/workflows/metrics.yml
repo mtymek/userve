@@ -7,6 +7,7 @@ permissions:
   contents: read
   actions: read
   pull-requests: write
+  id-token: write
 
 jobs:
   metrics:
@@ -23,3 +24,13 @@ jobs:
       - run: gocover-cobertura < coverage.out > coverage.xml
 
       - uses: unentropy/track-metrics@v0
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: unentropy-report
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
+        id: report_deployment
+    environment: # Optional, but recommended to show the report URL in GitHub Actions UI
+      name: github-pages
+      url: ${{ steps.report_deployment.outputs.page_url }}  
