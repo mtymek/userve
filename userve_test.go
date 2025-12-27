@@ -15,67 +15,6 @@ import (
 	"testing"
 )
 
-func TestDetectMIMEType(t *testing.T) {
-	tests := []struct {
-		filename string
-		expected string
-	}{
-		{"document.pdf", "application/pdf"},
-		{"image.jpg", "image/jpeg"},
-		{"image.jpeg", "image/jpeg"},
-		{"image.png", "image/png"},
-		{"file.txt", "text/plain; charset=utf-8"},
-		{"page.html", "text/html; charset=utf-8"},
-		{"data.json", "application/json"},
-		{"archive.zip", "application/zip"},
-		{"unknown.qzx", "application/octet-stream"},
-		{"noextension", "application/octet-stream"},
-		{"", "application/octet-stream"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.filename, func(t *testing.T) {
-			result := detectMIMEType(tt.filename)
-			if result != tt.expected {
-				t.Errorf("detectMIMEType(%q) = %q, want %q", tt.filename, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestParseArchiveFormat(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected ArchiveFormat
-		wantErr  bool
-	}{
-		{"tar.gz", ArchiveTarGz, false},
-		{"zip", ArchiveZip, false},
-		{"tar", ArchiveTar, false},
-		{"invalid", ArchiveTarGz, true},
-		{"tgz", ArchiveTarGz, true},
-		{"", ArchiveTarGz, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result, err := parseArchiveFormat(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parseArchiveFormat(%q) expected error, got nil", tt.input)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("parseArchiveFormat(%q) unexpected error: %v", tt.input, err)
-				}
-				if result != tt.expected {
-					t.Errorf("parseArchiveFormat(%q) = %v, want %v", tt.input, result, tt.expected)
-				}
-			}
-		})
-	}
-}
-
 func TestRunFileNotFound(t *testing.T) {
 	err := run([]string{"/nonexistent/path/to/file.txt"})
 	if err == nil {
@@ -127,10 +66,12 @@ func TestFileHandler(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &fileHandler{
-		filePath:         testFile,
-		fileName:         "testfile.txt",
-		fileSize:         info.Size(),
+	h := &handler{
+		provider: &fileProvider{
+			filePath: testFile,
+			fileName: "testfile.txt",
+			fileSize: info.Size(),
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     1,
@@ -139,7 +80,7 @@ func TestFileHandler(t *testing.T) {
 	req := httptest.NewRequest("GET", "/testfile.txt", nil)
 	rec := httptest.NewRecorder()
 
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	defer resp.Body.Close()
@@ -198,10 +139,12 @@ func TestFileHandlerSignalsDownloadComplete(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &fileHandler{
-		filePath:         testFile,
-		fileName:         "testfile.txt",
-		fileSize:         info.Size(),
+	h := &handler{
+		provider: &fileProvider{
+			filePath: testFile,
+			fileName: "testfile.txt",
+			fileSize: info.Size(),
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     1,
@@ -210,7 +153,7 @@ func TestFileHandlerSignalsDownloadComplete(t *testing.T) {
 	req := httptest.NewRequest("GET", "/testfile.txt", nil)
 	rec := httptest.NewRecorder()
 
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	// Check that downloadComplete was signaled
 	select {
@@ -234,10 +177,12 @@ func TestFileHandlerDownloadCounting(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &fileHandler{
-		filePath:         testFile,
-		fileName:         "testfile.txt",
-		fileSize:         info.Size(),
+	h := &handler{
+		provider: &fileProvider{
+			filePath: testFile,
+			fileName: "testfile.txt",
+			fileSize: info.Size(),
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     3, // Allow 3 downloads
@@ -247,7 +192,7 @@ func TestFileHandlerDownloadCounting(t *testing.T) {
 	for i := range 2 {
 		req := httptest.NewRequest("GET", "/testfile.txt", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 
 		select {
 		case <-downloadComplete:
@@ -260,7 +205,7 @@ func TestFileHandlerDownloadCounting(t *testing.T) {
 	// Third download should signal completion
 	req := httptest.NewRequest("GET", "/testfile.txt", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	select {
 	case <-downloadComplete:
@@ -283,10 +228,12 @@ func TestFileHandlerUnlimitedDownloads(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &fileHandler{
-		filePath:         testFile,
-		fileName:         "testfile.txt",
-		fileSize:         info.Size(),
+	h := &handler{
+		provider: &fileProvider{
+			filePath: testFile,
+			fileName: "testfile.txt",
+			fileSize: info.Size(),
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     0, // Unlimited
@@ -296,7 +243,7 @@ func TestFileHandlerUnlimitedDownloads(t *testing.T) {
 	for i := range 5 {
 		req := httptest.NewRequest("GET", "/testfile.txt", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 
 		select {
 		case <-downloadComplete:
@@ -307,7 +254,7 @@ func TestFileHandlerUnlimitedDownloads(t *testing.T) {
 	}
 }
 
-func TestDirHandlerArchiveFilename(t *testing.T) {
+func TestArchiveProviderFilename(t *testing.T) {
 	tests := []struct {
 		format   ArchiveFormat
 		expected string
@@ -318,18 +265,18 @@ func TestDirHandlerArchiveFilename(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		handler := &dirHandler{
+		p := &archiveProvider{
 			dirName: "testdir",
 			format:  tt.format,
 		}
-		result := handler.archiveFilename()
+		result := p.Filename()
 		if result != tt.expected {
-			t.Errorf("archiveFilename() with format %v = %q, want %q", tt.format, result, tt.expected)
+			t.Errorf("Filename() with format %v = %q, want %q", tt.format, result, tt.expected)
 		}
 	}
 }
 
-func TestDirHandlerContentType(t *testing.T) {
+func TestArchiveProviderContentType(t *testing.T) {
 	tests := []struct {
 		format   ArchiveFormat
 		expected string
@@ -340,13 +287,13 @@ func TestDirHandlerContentType(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		handler := &dirHandler{
+		p := &archiveProvider{
 			dirName: "testdir",
 			format:  tt.format,
 		}
-		result := handler.contentType()
+		result := p.ContentType()
 		if result != tt.expected {
-			t.Errorf("contentType() with format %v = %q, want %q", tt.format, result, tt.expected)
+			t.Errorf("ContentType() with format %v = %q, want %q", tt.format, result, tt.expected)
 		}
 	}
 }
@@ -372,10 +319,12 @@ func TestDirHandlerTarGzArchive(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &dirHandler{
-		dirPath:          testDir,
-		dirName:          "testdir",
-		format:           ArchiveTarGz,
+	h := &handler{
+		provider: &archiveProvider{
+			dirPath: testDir,
+			dirName: "testdir",
+			format:  ArchiveTarGz,
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     1,
@@ -384,7 +333,7 @@ func TestDirHandlerTarGzArchive(t *testing.T) {
 	req := httptest.NewRequest("GET", "/testdir.tar.gz", nil)
 	rec := httptest.NewRecorder()
 
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	defer resp.Body.Close()
@@ -444,10 +393,12 @@ func TestDirHandlerZipArchive(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &dirHandler{
-		dirPath:          testDir,
-		dirName:          "testdir",
-		format:           ArchiveZip,
+	h := &handler{
+		provider: &archiveProvider{
+			dirPath: testDir,
+			dirName: "testdir",
+			format:  ArchiveZip,
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     1,
@@ -456,7 +407,7 @@ func TestDirHandlerZipArchive(t *testing.T) {
 	req := httptest.NewRequest("GET", "/testdir.zip", nil)
 	rec := httptest.NewRecorder()
 
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	defer resp.Body.Close()
@@ -504,10 +455,12 @@ func TestDirHandlerUncompressedTar(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &dirHandler{
-		dirPath:          testDir,
-		dirName:          "testdir",
-		format:           ArchiveTar,
+	h := &handler{
+		provider: &archiveProvider{
+			dirPath: testDir,
+			dirName: "testdir",
+			format:  ArchiveTar,
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     1,
@@ -516,7 +469,7 @@ func TestDirHandlerUncompressedTar(t *testing.T) {
 	req := httptest.NewRequest("GET", "/testdir.tar", nil)
 	rec := httptest.NewRecorder()
 
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	defer resp.Body.Close()
@@ -567,10 +520,12 @@ func TestDirHandlerDownloadCounting(t *testing.T) {
 	var wg sync.WaitGroup
 	downloadComplete := make(chan struct{}, 1)
 
-	handler := &dirHandler{
-		dirPath:          testDir,
-		dirName:          "testdir",
-		format:           ArchiveTarGz,
+	h := &handler{
+		provider: &archiveProvider{
+			dirPath: testDir,
+			dirName: "testdir",
+			format:  ArchiveTarGz,
+		},
 		activeDownloads:  &wg,
 		downloadComplete: downloadComplete,
 		maxDownloads:     2,
@@ -579,7 +534,7 @@ func TestDirHandlerDownloadCounting(t *testing.T) {
 	// First download should not signal completion
 	req := httptest.NewRequest("GET", "/testdir.tar.gz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	select {
 	case <-downloadComplete:
@@ -591,7 +546,7 @@ func TestDirHandlerDownloadCounting(t *testing.T) {
 	// Second download should signal completion
 	req = httptest.NewRequest("GET", "/testdir.tar.gz", nil)
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	select {
 	case <-downloadComplete:

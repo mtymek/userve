@@ -31,23 +31,6 @@ const (
 	ArchiveTar
 )
 
-// validArchiveFormats lists accepted values for the -a flag
-var validArchiveFormats = []string{"tar.gz", "zip", "tar"}
-
-// parseArchiveFormat converts a string to ArchiveFormat
-func parseArchiveFormat(s string) (ArchiveFormat, error) {
-	switch s {
-	case "tar.gz":
-		return ArchiveTarGz, nil
-	case "zip":
-		return ArchiveZip, nil
-	case "tar":
-		return ArchiveTar, nil
-	default:
-		return ArchiveTarGz, fmt.Errorf("invalid archive format %q: valid formats are %v", s, validArchiveFormats)
-	}
-}
-
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -81,9 +64,16 @@ func run(args []string) error {
 	filePath := fs.Arg(0)
 
 	// Parse archive format
-	format, err := parseArchiveFormat(*archiveFormat)
-	if err != nil {
-		return err
+	var format ArchiveFormat
+	switch *archiveFormat {
+	case "tar.gz":
+		format = ArchiveTarGz
+	case "zip":
+		format = ArchiveZip
+	case "tar":
+		format = ArchiveTar
+	default:
+		return fmt.Errorf("invalid archive format %q: valid formats are tar.gz, zip, tar", *archiveFormat)
 	}
 
 	// Validate file exists
@@ -121,38 +111,32 @@ func run(args []string) error {
 	// Channel to signal when download limit reached
 	downloadComplete := make(chan struct{}, 1)
 
-	// Create appropriate handler
-	var handler http.Handler
-	var displayName string
-
+	// Create appropriate content provider
+	var provider contentProvider
 	if info.IsDir() {
-		// Directory serving
-		dirHandler := &dirHandler{
-			dirPath:          filePath,
-			dirName:          filepath.Base(filePath),
-			format:           format,
-			activeDownloads:  &activeDownloads,
-			downloadComplete: downloadComplete,
-			maxDownloads:     int32(*count),
+		provider = &archiveProvider{
+			dirPath: filePath,
+			dirName: filepath.Base(filePath),
+			format:  format,
 		}
-		handler = dirHandler
-		displayName = dirHandler.archiveFilename()
 	} else {
-		// File serving
-		fileHandler := &fileHandler{
-			filePath:         filePath,
-			fileName:         filepath.Base(filePath),
-			fileSize:         info.Size(),
-			activeDownloads:  &activeDownloads,
-			downloadComplete: downloadComplete,
-			maxDownloads:     int32(*count),
+		provider = &fileProvider{
+			filePath: filePath,
+			fileName: filepath.Base(filePath),
+			fileSize: info.Size(),
 		}
-		handler = fileHandler
-		displayName = fileHandler.fileName
 	}
 
+	h := &handler{
+		provider:         provider,
+		activeDownloads:  &activeDownloads,
+		downloadComplete: downloadComplete,
+		maxDownloads:     int32(*count),
+	}
+	displayName := provider.Filename()
+
 	server := &http.Server{
-		Handler: handler,
+		Handler: h,
 	}
 
 	// Set up signal handling for graceful shutdown
@@ -175,7 +159,6 @@ func run(args []string) error {
 	}
 	fmt.Printf("Press Ctrl+C to stop\n")
 
-	// Wait for signal, server error, or download limit reached
 	select {
 	case sig := <-sigChan:
 		fmt.Printf("\nReceived %v, shutting down...\n", sig)
@@ -211,126 +194,44 @@ func run(args []string) error {
 	return nil
 }
 
-type fileHandler struct {
-	filePath         string
-	fileName         string
-	fileSize         int64
+// contentProvider abstracts the content being served (file or archive)
+type contentProvider interface {
+	// Filename returns the name to use in Content-Disposition
+	Filename() string
+	// ContentType returns the MIME type
+	ContentType() string
+	// ContentLength returns the size if known, or -1 for streaming
+	ContentLength() int64
+	// WriteTo writes the content to the writer
+	WriteTo(w io.Writer) error
+}
+
+// handler is the unified HTTP handler for serving any content
+type handler struct {
+	provider         contentProvider
 	activeDownloads  *sync.WaitGroup
 	downloadComplete chan struct{}
 	maxDownloads     int32
 	downloadCount    atomic.Int32
 }
 
-func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.activeDownloads.Add(1)
 	defer h.activeDownloads.Done()
 
 	remoteAddr := r.RemoteAddr
 	fmt.Printf("[%s] Download started from %s\n", time.Now().Format("15:04:05"), remoteAddr)
 
-	// Open file
-	file, err := os.Open(h.filePath)
-	if err != nil {
-		fmt.Printf("[%s] Error opening file: %v\n", time.Now().Format("15:04:05"), err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-	defer file.Close()
-
 	// Set headers
-	contentType := detectMIMEType(h.fileName)
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", h.fileName))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", h.fileSize))
+	w.Header().Set("Content-Type", h.provider.ContentType())
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", h.provider.Filename()))
+	if length := h.provider.ContentLength(); length >= 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", length))
+	}
 
-	// Serve file
-	written, err := io.Copy(w, file)
-	if err != nil {
+	// Serve content
+	if err := h.provider.WriteTo(w); err != nil {
 		fmt.Printf("[%s] Download interrupted from %s: %v\n", time.Now().Format("15:04:05"), remoteAddr, err)
-		return
-	}
-
-	fmt.Printf("[%s] Download completed from %s (%d bytes)\n", time.Now().Format("15:04:05"), remoteAddr, written)
-
-	// Track download count
-	newCount := h.downloadCount.Add(1)
-
-	// Check if we've reached the limit
-	if h.maxDownloads == 0 {
-		// Unlimited mode - no shutdown
-		return
-	}
-
-	remaining := h.maxDownloads - newCount
-	if remaining > 0 {
-		fmt.Printf("[%s] %d download(s) remaining\n", time.Now().Format("15:04:05"), remaining)
-	} else {
-		// Signal shutdown when limit reached
-		select {
-		case h.downloadComplete <- struct{}{}:
-		default:
-		}
-	}
-}
-
-type dirHandler struct {
-	dirPath          string
-	dirName          string
-	format           ArchiveFormat
-	activeDownloads  *sync.WaitGroup
-	downloadComplete chan struct{}
-	maxDownloads     int32
-	downloadCount    atomic.Int32
-}
-
-func (h *dirHandler) archiveFilename() string {
-	switch h.format {
-	case ArchiveTarGz:
-		return h.dirName + ".tar.gz"
-	case ArchiveZip:
-		return h.dirName + ".zip"
-	case ArchiveTar:
-		return h.dirName + ".tar"
-	default:
-		return h.dirName + ".tar.gz"
-	}
-}
-
-func (h *dirHandler) contentType() string {
-	switch h.format {
-	case ArchiveTarGz:
-		return "application/gzip"
-	case ArchiveZip:
-		return "application/zip"
-	case ArchiveTar:
-		return "application/x-tar"
-	default:
-		return "application/gzip"
-	}
-}
-
-func (h *dirHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.activeDownloads.Add(1)
-	defer h.activeDownloads.Done()
-
-	remoteAddr := r.RemoteAddr
-	fmt.Printf("[%s] Download started from %s\n", time.Now().Format("15:04:05"), remoteAddr)
-
-	// Set headers
-	filename := h.archiveFilename()
-	w.Header().Set("Content-Type", h.contentType())
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	// Note: Content-Length is not set for streaming archives
-
-	var err error
-	if h.format == ArchiveZip {
-		err = h.writeZipArchive(w)
-	} else {
-		err = h.writeTarArchive(w)
-	}
-
-	if err != nil {
-		fmt.Printf("[%s] Archive creation interrupted from %s: %v\n", time.Now().Format("15:04:05"), remoteAddr, err)
 		return
 	}
 
@@ -357,10 +258,88 @@ func (h *dirHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *dirHandler) writeTarArchive(w io.Writer) error {
+// fileProvider serves a single file
+type fileProvider struct {
+	filePath string
+	fileName string
+	fileSize int64
+}
+
+func (p *fileProvider) Filename() string {
+	return p.fileName
+}
+
+func (p *fileProvider) ContentType() string {
+	contentType := mime.TypeByExtension(filepath.Ext(p.fileName))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return contentType
+}
+
+func (p *fileProvider) ContentLength() int64 {
+	return p.fileSize
+}
+
+func (p *fileProvider) WriteTo(w io.Writer) error {
+	file, err := os.Open(p.filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = io.Copy(w, file)
+	return err
+}
+
+// archiveProvider serves a directory as an archive
+type archiveProvider struct {
+	dirPath string
+	dirName string
+	format  ArchiveFormat
+}
+
+func (p *archiveProvider) Filename() string {
+	switch p.format {
+	case ArchiveTarGz:
+		return p.dirName + ".tar.gz"
+	case ArchiveZip:
+		return p.dirName + ".zip"
+	case ArchiveTar:
+		return p.dirName + ".tar"
+	default:
+		return p.dirName + ".tar.gz"
+	}
+}
+
+func (p *archiveProvider) ContentType() string {
+	switch p.format {
+	case ArchiveTarGz:
+		return "application/gzip"
+	case ArchiveZip:
+		return "application/zip"
+	case ArchiveTar:
+		return "application/x-tar"
+	default:
+		return "application/gzip"
+	}
+}
+
+func (p *archiveProvider) ContentLength() int64 {
+	return -1 // Streaming, unknown size
+}
+
+func (p *archiveProvider) WriteTo(w io.Writer) error {
+	if p.format == ArchiveZip {
+		return p.writeZipArchive(w)
+	}
+	return p.writeTarArchive(w)
+}
+
+func (p *archiveProvider) writeTarArchive(w io.Writer) error {
 	var tw *tar.Writer
 
-	switch h.format {
+	switch p.format {
 	case ArchiveTarGz:
 		gw := gzip.NewWriter(w)
 		defer gw.Close()
@@ -374,9 +353,9 @@ func (h *dirHandler) writeTarArchive(w io.Writer) error {
 	}
 	defer tw.Close()
 
-	baseDir := filepath.Base(h.dirPath)
+	baseDir := filepath.Base(p.dirPath)
 
-	return filepath.Walk(h.dirPath, func(path string, info os.FileInfo, err error) error {
+	return filepath.Walk(p.dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -388,7 +367,7 @@ func (h *dirHandler) writeTarArchive(w io.Writer) error {
 		}
 
 		// Adjust the name to be relative to the directory being archived
-		relPath, err := filepath.Rel(h.dirPath, path)
+		relPath, err := filepath.Rel(p.dirPath, path)
 		if err != nil {
 			return err
 		}
@@ -416,13 +395,13 @@ func (h *dirHandler) writeTarArchive(w io.Writer) error {
 	})
 }
 
-func (h *dirHandler) writeZipArchive(w io.Writer) error {
+func (p *archiveProvider) writeZipArchive(w io.Writer) error {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
-	baseDir := filepath.Base(h.dirPath)
+	baseDir := filepath.Base(p.dirPath)
 
-	return filepath.Walk(h.dirPath, func(path string, info os.FileInfo, err error) error {
+	return filepath.Walk(p.dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -434,7 +413,7 @@ func (h *dirHandler) writeZipArchive(w io.Writer) error {
 		}
 
 		// Adjust the name to be relative to the directory being archived
-		relPath, err := filepath.Rel(h.dirPath, path)
+		relPath, err := filepath.Rel(p.dirPath, path)
 		if err != nil {
 			return err
 		}
@@ -468,20 +447,6 @@ func (h *dirHandler) writeZipArchive(w io.Writer) error {
 
 		return nil
 	})
-}
-
-func detectMIMEType(filename string) string {
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		return "application/octet-stream"
-	}
-
-	mimeType := mime.TypeByExtension(ext)
-	if mimeType == "" {
-		return "application/octet-stream"
-	}
-
-	return mimeType
 }
 
 func getLocalIP() string {
