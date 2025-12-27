@@ -13,6 +13,7 @@ The system SHALL serve a specified file via HTTP when invoked with a file path a
 - **THEN** the system starts an HTTP server
 - **AND** displays the URL where the file can be downloaded
 - **AND** the file is available for download at that URL
+- **AND** the system exits automatically after the file is downloaded once
 
 #### Scenario: File not found
 - **WHEN** user runs `userve <filepath>` with a non-existent file
@@ -76,6 +77,15 @@ The system SHALL display progress information during file transfers.
 #### Scenario: Download completed
 - **WHEN** a download completes successfully
 - **THEN** the system displays a completion message
+
+### Requirement: One-Shot Download
+
+The system SHALL exit automatically after a single successful download by default.
+
+#### Scenario: Auto-exit after download
+- **WHEN** a client successfully completes downloading the file
+- **THEN** the system displays a completion message
+- **AND** exits cleanly with status code 0
 
 ### Requirement: Graceful Shutdown
 

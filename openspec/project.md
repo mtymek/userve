@@ -1,11 +1,10 @@
 # Project Context
 
 ## Purpose
-[Describe your project's purpose and goals]
+Simple utility for sharing files over a local network.
 
 ## Tech Stack
-- [List your primary technologies]
-- [e.g., TypeScript, React, Node.js]
+- Go
 
 ## Project Conventions
 
