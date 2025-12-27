@@ -1,4 +1,4 @@
-# userve
+# uServe
 
 Share a file over your local network with a single command.
 
@@ -43,3 +43,7 @@ userve -p 9000 photo.jpg
 # Bind to a specific interface
 userve -i 192.168.1.100 archive.zip
 ```
+
+## Inspiration
+
+This project is inspired by Woof (https://github.com/simon-budig/woof) tool, which doesn't seem to be maintained anymore.

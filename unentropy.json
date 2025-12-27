@@ -1,0 +1,28 @@
+{
+  "metrics": {
+    "lines-of-code": {
+      "$ref": "loc",
+      "name": "Lines of Code",
+      "command": "@collect loc . --language go"
+    },
+    "test-coverage": {
+      "$ref": "coverage",
+      "name": "Test Coverage",
+      "command": "@collect coverage-cobertura coverage.xml"
+    }
+  },
+  "storage": {
+    "type": "sqlite-artifact"
+  },
+  "qualityGate": {
+    "mode": "soft",
+    "thresholds": [
+      {
+        "metric": "test-coverage",
+        "mode": "min",
+        "target": 60,
+        "severity": "warning"
+      }
+    ]
+  }
+}

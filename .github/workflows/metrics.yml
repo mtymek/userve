@@ -1,0 +1,25 @@
+name: Metrics
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - run: go mod download
+
+      - run: go test -coverprofile=coverage.out ./...
+      - run: go install github.com/boumenot/gocover-cobertura@latest
+      - run: gocover-cobertura < coverage.out > coverage.xml
+
+      - uses: unentropy/track-metrics@v0
