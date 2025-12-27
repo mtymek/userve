@@ -18,16 +18,6 @@
 - [x] 2.7 Set appropriate filename in Content-Disposition
 - [x] 2.8 Add error handling for invalid archive format
 
-## 3. Upload Mode
-- [ ] 3.1 Add `-U` flag for upload mode
-- [ ] 3.2 Create HTML upload form
-- [ ] 3.3 Implement multipart form file handler
-- [ ] 3.4 Save uploaded files to current directory
-- [ ] 3.5 Handle filename conflicts (append number or reject)
-- [ ] 3.6 Display upload progress and completion
-- [ ] 3.7 Apply download count limit to uploads
-
-## 4. Testing
-- [x] 4.1 Unit tests for download counting
-- [x] 4.2 Integration tests for directory archiving (all formats)
-- [ ] 4.3 Integration tests for upload mode
+## 3. Testing
+- [x] 3.1 Unit tests for download counting
+- [x] 3.2 Integration tests for directory archiving (all formats)

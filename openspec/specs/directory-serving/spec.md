@@ -1,9 +1,8 @@
-# File Serving - Phase 2
+# directory-serving Specification
 
-Advanced serving features building on the MVP.
-
-## ADDED Requirements
-
+## Purpose
+TBD - created by archiving change add-directory-serving. Update Purpose after archive.
+## Requirements
 ### Requirement: Download Count Limit
 
 The system SHALL limit the number of times a file can be downloaded and terminate after the limit is reached.
@@ -54,3 +53,4 @@ The system SHALL serve directories as compressed archives.
 #### Scenario: Invalid archive format
 - **WHEN** user runs `userve -a invalid <dirpath>` with an unrecognized format
 - **THEN** the system exits with an error listing valid formats
+

@@ -1,7 +1,7 @@
 # file-serving Specification
 
 ## Purpose
-TBD - created by archiving change add-file-serving. Update Purpose after archive.
+This specification represents the Minimum Viable Product for this project - ability to serve single files over a local network.
 ## Requirements
 ### Requirement: Single File Serving
 
